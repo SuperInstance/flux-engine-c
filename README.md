@@ -2,7 +2,11 @@
 
 Single-header C99 library combining constraint checking, graph fracture, sediment correction, and 10 domain presets.
 
-## 3-Line Integration
+## How It Works
+
+This is the complete flux constraint system in one file: check values against bounds, fracture independent constraints into parallel blocks, and layer corrections via sediment. Three stages, one header.
+
+### The 3-Line Integration Story
 
 ```c
 #define FLUX_ENGINE_IMPLEMENTATION
@@ -11,7 +15,15 @@ Single-header C99 library combining constraint checking, graph fracture, sedimen
 // That's it. No dependencies beyond libc + libm.
 ```
 
-## Quick Start
+This is the [stb-style single-header pattern](https://github.com/nothings/stb). The header acts as both the public API (types and function declarations) and the implementation. Include it without `FLUX_ENGINE_IMPLEMENTATION` to get declarations only — put that in multiple files. Define it in exactly one `.c` file to emit the implementation. No build system changes, no CMake, no linker flags. Drop the file in your project and compile.
+
+### The Three Stages
+
+**Check** — Given N values and N `(lo, hi)` bounds, produce an error bitmask. Bit `i` is set if value `i` violates its bounds. `NaN` always violates. Boundary values pass (`<=`).
+
+**Fracture** — Build a bipartite graph (constraints × dimensions), find connected components via BFS. Each component is an independent block. Check blocks in parallel, coalesce with bitwise OR. Provably zero false negatives.
+
+**Sediment** — Stack immutable correction layers on top of the base constraints. "Widen coolant temp to [-50, 160] after sensor upgrade" becomes a sediment layer. The base constraint never changes — corrections accumulate, and you always know what was overridden and why.
 
 ```c
 #define FLUX_ENGINE_IMPLEMENTATION
@@ -19,20 +31,33 @@ Single-header C99 library combining constraint checking, graph fracture, sedimen
 #include <stdio.h>
 
 int main(void) {
-    // Load automotive preset
+    /* Load automotive preset: 8 constraints */
     FluxConstraint c[8];
     int n = flux_preset_automotive(c);
 
-    // Check a value
-    float coolant_temp = 95.0f;
-    uint8_t mask = flux_check(coolant_temp, c, n);
+    /* Check a single value */
+    float values[8] = {95.0f, 3.5f, 3500.0f, 14.1f, 40.0f, 100.0f, 12.0f, 500.0f};
+    uint8_t mask = flux_check(values, c, n);
 
-    if (mask & 0x04)  // bit 2 = coolant_temp_c
-        printf("Coolant temp %.1f°C out of range!\n", coolant_temp);
+    /* Which constraints failed? */
+    for (int i = 0; i < n; i++)
+        if (mask & (1 << i))
+            printf("FAIL: %s\n", c[i].name);
 
     return 0;
 }
 ```
+
+## What stb-Style Headers Teach About Dependency Management
+
+The single-header pattern is a design philosophy, not just a packaging trick. It teaches you something about how constraint systems (and libraries in general) should relate to their host programs:
+
+- **Zero integration cost.** No package manager, no build system, no linker flags. Copy one file. This matters for constraint systems because they often end up in environments where adding a dependency is expensive — firmware, embedded systems, game engine plugins, kernel modules. The constraint library should be easier to add than to re-implement.
+- **Implementation-on-demand.** The preprocessor emits implementation code exactly once, at the translation unit where you want it. Every other file sees only declarations. This is the C equivalent of "header-only" in C++ — but without the template bloat. One copy of each function exists in the final binary.
+- **Single compilation unit.** Because everything is in one header, the compiler can see all the code at once and inline aggressively. `flux_check` on a fixed-size array with known bounds? The optimizer can unroll the entire loop. This is why single-header libraries often benchmark faster than their multi-file equivalents.
+- **Fork-friendly.** One file means you can understand the entire library by reading top to bottom. Need to modify the BFS? It's right there. No jumping between 15 source files. For a constraint system that you might need to adapt to exotic hardware, this readability is a feature.
+
+The constraint system architecture maps naturally to the single-header pattern: small, self-contained, performance-critical, and likely to end up in constrained environments.
 
 ## What's Inside
 
@@ -74,6 +99,24 @@ Or manually:
 gcc -O2 -lm -o test test_flux_engine.c
 ./test
 ```
+
+## Performance
+
+Single-file, no external dependencies, compiler can see everything for aggressive inlining.
+
+```bash
+make run-bench
+```
+
+## Where to Go Next
+
+| Repo | Language | What You'll Learn |
+|------|----------|-------------------|
+| [flux-fracture](https://github.com/SuperInstance/flux-fracture) | Rust | Fracture algorithm with ownership model, zero-cost generics, parallel iterators |
+| [flux-fracture-c](https://github.com/SuperInstance/flux-fracture-c) | C | Standalone fracture library (same BFS, separate repo for minimal deps) |
+| [flux-check-js](https://github.com/SuperInstance/flux-check-js) | TypeScript | Full engine with fracture + sediment + industry presets + CLI |
+| [plato-types](https://github.com/SuperInstance/plato-types) | Python | Tile lifecycle and Lamport clocks for fleet coordination |
+| [tensor-spline](https://github.com/SuperInstance/tensor-spline) | Python | SplineLinear compression for micro models |
 
 ## License
 
