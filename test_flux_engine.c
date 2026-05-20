@@ -555,6 +555,317 @@ static void test_vector_nan_violates(void) {
 }
 
 /* ================================================================== */
+/* Section 7: Serialization (8 tests)                                  */
+/* ================================================================== */
+
+static void test_json_roundtrip(void) {
+    TEST_START("json: roundtrip 3 constraints");
+    FluxConstraint c[3] = {
+        {"temp", -40.0f, 150.0f, FLUX_SEV_CAUTION},
+        {"pressure", 0.0f, 200.0f, FLUX_SEV_WARNING},
+        {"speed", 0.0f, 100.0f, FLUX_SEV_CRITICAL},
+    };
+    char* json = flux_constraints_to_json(c, 3);
+    ASSERT_EQ(json != NULL, true, "json should not be NULL");
+
+    FluxConstraint out[3];
+    int n = flux_constraints_from_json(json, out, 3);
+    free(json);
+    ASSERT_EQ(n, 3, "should parse 3");
+    ASSERT_EQ(strcmp(out[0].name, "temp"), 0, "name 0");
+    ASSERT_EQ(strcmp(out[1].name, "pressure"), 0, "name 1");
+    ASSERT_EQ(strcmp(out[2].name, "speed"), 0, "name 2");
+    /* Bounds should survive within float precision */
+    ASSERT_EQ(out[0].severity, FLUX_SEV_CAUTION, "sev 0");
+    ASSERT_EQ(out[2].severity, FLUX_SEV_CRITICAL, "sev 2");
+    PASS();
+}
+
+static void test_json_bounds_preserved(void) {
+    TEST_START("json: bounds preserved after roundtrip");
+    FluxConstraint c = {"temp", -40.0f, 150.0f, FLUX_SEV_WARNING};
+    char* json = flux_constraints_to_json(&c, 1);
+    FluxConstraint out;
+    int n = flux_constraints_from_json(json, &out, 1);
+    free(json);
+    ASSERT_EQ(n, 1, "1 parsed");
+    ASSERT_EQ(out.lo <= -39.9f && out.lo >= -40.1f, true, "lo preserved");
+    ASSERT_EQ(out.hi >= 149.9f && out.hi <= 150.1f, true, "hi preserved");
+    PASS();
+}
+
+static void test_json_empty_array(void) {
+    TEST_START("json: empty array → 0 constraints");
+    FluxConstraint out[1];
+    int n = flux_constraints_from_json("[]", out, 1);
+    ASSERT_EQ(n, 0, "empty array → 0");
+    PASS();
+}
+
+static void test_json_null_input(void) {
+    TEST_START("json: NULL input → -1");
+    FluxConstraint out[1];
+    int n = flux_constraints_from_json(NULL, out, 1);
+    ASSERT_EQ(n, -1, "NULL → -1");
+    PASS();
+}
+
+static void test_json_invalid_syntax(void) {
+    TEST_START("json: invalid syntax → -1");
+    FluxConstraint out[1];
+    int n = flux_constraints_from_json("not json", out, 1);
+    ASSERT_EQ(n, -1, "invalid → -1");
+    PASS();
+}
+
+static void test_file_save_load(void) {
+    TEST_START("file: save and load roundtrip");
+    FluxConstraint c[2] = {
+        {"x", -10.0f, 10.0f, FLUX_SEV_CAUTION},
+        {"y", 0.0f, 100.0f, FLUX_SEV_WARNING},
+    };
+    const char* path = "/tmp/flux_test_preset.json";
+    int rc = flux_save_preset(path, c, 2);
+    ASSERT_EQ(rc, 0, "save should succeed");
+
+    FluxConstraint loaded[2];
+    int n = flux_load_preset(path, loaded, 2);
+    ASSERT_EQ(n, 2, "should load 2");
+    ASSERT_EQ(strcmp(loaded[0].name, "x"), 0, "name x");
+    ASSERT_EQ(strcmp(loaded[1].name, "y"), 0, "name y");
+    PASS();
+}
+
+static void test_file_not_found(void) {
+    TEST_START("file: nonexistent → -1");
+    FluxConstraint out[1];
+    int n = flux_load_preset("/tmp/flux_nonexistent_12345.json", out, 1);
+    ASSERT_EQ(n, -1, "not found → -1");
+    PASS();
+}
+
+static void test_json_preset_roundtrip(void) {
+    TEST_START("json: automotive preset roundtrip");
+    FluxConstraint c[8];
+    int n = flux_preset_automotive(c);
+    char* json = flux_constraints_to_json(c, n);
+    ASSERT_EQ(json != NULL, true, "json not NULL");
+
+    FluxConstraint out[8];
+    int n2 = flux_constraints_from_json(json, out, 8);
+    free(json);
+    ASSERT_EQ(n2, 8, "parsed 8");
+    /* Verify constraints still work */
+    uint8_t m = flux_check(12.0f, out, n2);
+    ASSERT_EQ(m & 0x40, 0, "battery 12V passes after roundtrip");
+    PASS();
+}
+
+/* ================================================================== */
+/* Section 8: Aggregation (7 tests)                                    */
+/* ================================================================== */
+
+static void test_agg_all_pass(void) {
+    TEST_START("aggregate: all readings pass");
+    FluxConstraint c = {"x", 0, 100, FLUX_SEV_CAUTION};
+    uint8_t masks[] = {0, 0, 0, 0};
+    FluxAggregate agg;
+    flux_aggregate(masks, 4, &c, 1, &agg);
+    ASSERT_EQ(agg.total_readings, 4, "4 readings");
+    ASSERT_EQ(agg.total_violations, 0, "0 violations");
+    ASSERT_EQ(agg.severity_breakdown[FLUX_SEV_PASS], 4, "4 pass");
+    PASS();
+}
+
+static void test_agg_all_violate(void) {
+    TEST_START("aggregate: all readings violate");
+    FluxConstraint c = {"x", 0, 10, FLUX_SEV_CRITICAL};
+    uint8_t masks[] = {0x01, 0x01, 0x01};
+    FluxAggregate agg;
+    flux_aggregate(masks, 3, &c, 1, &agg);
+    ASSERT_EQ(agg.total_violations, 3, "3 violations");
+    ASSERT_EQ(agg.per_constraint_violations[0], 3, "c0 violations = 3");
+    ASSERT_EQ(agg.severity_breakdown[FLUX_SEV_CRITICAL], 3, "3 critical");
+    PASS();
+}
+
+static void test_agg_violation_rate(void) {
+    TEST_START("aggregate: violation rate correct");
+    FluxConstraint c = {"x", 0, 10, FLUX_SEV_CAUTION};
+    uint8_t masks[] = {0, 0x01, 0, 0x01, 0};
+    FluxAggregate agg;
+    flux_aggregate(masks, 5, &c, 1, &agg);
+    ASSERT_EQ(agg.total_readings, 5, "5 total");
+    ASSERT_EQ(agg.total_violations, 2, "2 violations");
+    /* rate = 2/5 = 0.4 */
+    ASSERT_EQ(agg.violation_rate > 0.39 && agg.violation_rate < 0.41, true, "rate ~0.4");
+    PASS();
+}
+
+static void test_agg_per_constraint(void) {
+    TEST_START("aggregate: per-constraint violation counts");
+    FluxConstraint c[3] = {
+        {"a", 0, 10, FLUX_SEV_CAUTION},
+        {"b", 0, 10, FLUX_SEV_WARNING},
+        {"c", 0, 10, FLUX_SEV_CRITICAL},
+    };
+    /* reading 0: a fails, reading 1: b+c fail, reading 2: all pass */
+    uint8_t masks[] = {0x01, 0x06, 0x00};
+    FluxAggregate agg;
+    flux_aggregate(masks, 3, c, 3, &agg);
+    ASSERT_EQ(agg.per_constraint_violations[0], 1, "a = 1");
+    ASSERT_EQ(agg.per_constraint_violations[1], 1, "b = 1");
+    ASSERT_EQ(agg.per_constraint_violations[2], 1, "c = 1");
+    PASS();
+}
+
+static void test_agg_worst_reading(void) {
+    TEST_START("aggregate: worst reading index");
+    FluxConstraint c[3] = {
+        {"a", 0, 10, FLUX_SEV_CAUTION},
+        {"b", 0, 10, FLUX_SEV_CAUTION},
+        {"c", 0, 10, FLUX_SEV_CAUTION},
+    };
+    uint8_t masks[] = {0x01, 0x07, 0x02}; /* 1, 3, 1 violations */
+    FluxAggregate agg;
+    flux_aggregate(masks, 3, c, 3, &agg);
+    ASSERT_EQ(agg.worst_reading_index, 1, "reading 1 has most violations");
+    PASS();
+}
+
+static void test_agg_severity_breakdown(void) {
+    TEST_START("aggregate: severity breakdown");
+    FluxConstraint c[2] = {
+        {"a", 0, 10, FLUX_SEV_CAUTION},
+        {"b", 0, 10, FLUX_SEV_CRITICAL},
+    };
+    /* reading 0: a fails (caution), reading 1: b fails (critical), reading 2: pass */
+    uint8_t masks[] = {0x01, 0x02, 0x00};
+    FluxAggregate agg;
+    flux_aggregate(masks, 3, c, 2, &agg);
+    ASSERT_EQ(agg.severity_breakdown[FLUX_SEV_PASS], 1, "1 pass");
+    ASSERT_EQ(agg.severity_breakdown[FLUX_SEV_CAUTION], 1, "1 caution");
+    ASSERT_EQ(agg.severity_breakdown[FLUX_SEV_CRITICAL], 1, "1 critical");
+    PASS();
+}
+
+static void test_agg_empty(void) {
+    TEST_START("aggregate: empty input");
+    FluxAggregate agg;
+    flux_aggregate(NULL, 0, NULL, 0, &agg);
+    ASSERT_EQ(agg.total_readings, 0, "0 readings");
+    ASSERT_EQ(agg.total_violations, 0, "0 violations");
+    ASSERT_EQ(agg.violation_rate, 0.0, "rate 0");
+    PASS();
+}
+
+/* ================================================================== */
+/* Section 9: Drift Detection (6 tests)                                */
+/* ================================================================== */
+
+static void test_drift_init(void) {
+    TEST_START("drift: init zeros state");
+    FluxDriftDetector det;
+    flux_drift_init(&det, 100);
+    ASSERT_EQ(det.window_size, 100, "window 100");
+    ASSERT_EQ(det.count, 0, "count 0");
+    for (int i = 0; i < FLUX_MAX_CONSTRAINTS; i++) {
+        ASSERT_EQ(det.sums[i] == 0.0, true, "sum 0");
+    }
+    PASS();
+}
+
+static void test_drift_no_drift(void) {
+    TEST_START("drift: centered values → no drift");
+    FluxConstraint c = {"temp", 0, 100, FLUX_SEV_CAUTION};
+    FluxDriftDetector det;
+    flux_drift_init(&det, 10);
+    /* Add values centered at midpoint (50) */
+    for (int i = 0; i < 10; i++) {
+        double v = 50.0;
+        flux_drift_add(&det, &v, 1);
+    }
+    int dc[8]; double dr[8];
+    int nd = flux_drift_detect(&det, &c, 1, dc, dr);
+    ASSERT_EQ(nd, 0, "no drift");
+    PASS();
+}
+
+static void test_drift_detected(void) {
+    TEST_START("drift: offset values → drift detected");
+    FluxConstraint c = {"temp", 0, 100, FLUX_SEV_CAUTION};
+    FluxDriftDetector det;
+    flux_drift_init(&det, 10);
+    /* Add values at 95 — offset from midpoint 50 by 45, threshold is 10% of 100 = 10 */
+    for (int i = 0; i < 10; i++) {
+        double v = 95.0;
+        flux_drift_add(&det, &v, 1);
+    }
+    int dc[8]; double dr[8];
+    int nd = flux_drift_detect(&det, &c, 1, dc, dr);
+    ASSERT_EQ(nd, 1, "1 drifting");
+    ASSERT_EQ(dc[0], 0, "constraint 0 drifting");
+    ASSERT_EQ(dr[0] > 0.0, true, "drift rate > 0");
+    PASS();
+}
+
+static void test_drift_multi_constraint(void) {
+    TEST_START("drift: only one of two constraints drifting");
+    FluxConstraint c[2] = {
+        {"temp", 0, 100, FLUX_SEV_CAUTION},
+        {"speed", 0, 200, FLUX_SEV_CAUTION},
+    };
+    FluxDriftDetector det;
+    flux_drift_init(&det, 10);
+    /* temp at 95 (drifting), speed at 100 (centered) */
+    for (int i = 0; i < 10; i++) {
+        double v[2] = {95.0, 100.0};
+        flux_drift_add(&det, v, 2);
+    }
+    int dc[8]; double dr[8];
+    int nd = flux_drift_detect(&det, c, 2, dc, dr);
+    ASSERT_EQ(nd, 1, "1 drifting");
+    ASSERT_EQ(dc[0], 0, "temp drifting, not speed");
+    PASS();
+}
+
+static void test_drift_empty(void) {
+    TEST_START("drift: no readings → no drift");
+    FluxConstraint c = {"x", 0, 100, FLUX_SEV_CAUTION};
+    FluxDriftDetector det;
+    flux_drift_init(&det, 10);
+    int dc[8]; double dr[8];
+    int nd = flux_drift_detect(&det, &c, 1, dc, dr);
+    ASSERT_EQ(nd, 0, "empty → 0");
+    PASS();
+}
+
+static void test_drift_with_aggregation(void) {
+    TEST_START("integration: drift + aggregate pipeline");
+    FluxConstraint c = {"temp", 0, 100, FLUX_SEV_CAUTION};
+    FluxDriftDetector det;
+    flux_drift_init(&det, 5);
+    /* Values drifting high: 60, 70, 80, 90, 95 */
+    double vals[] = {60.0, 70.0, 80.0, 90.0, 95.0};
+    uint8_t masks[5];
+    float fvals[5];
+    for (int i = 0; i < 5; i++) {
+        flux_drift_add(&det, &vals[i], 1);
+        fvals[i] = (float)vals[i];
+    }
+    flux_check_batch(fvals, 5, &c, 1, masks);
+
+    FluxAggregate agg;
+    flux_aggregate(masks, 5, &c, 1, &agg);
+    ASSERT_EQ(agg.total_readings, 5, "5 readings");
+    /* None violate [0,100] but drift should be detected */
+    int dc[8]; double dr[8];
+    int nd = flux_drift_detect(&det, &c, 1, dc, dr);
+    ASSERT_EQ(nd, 1, "drift detected despite no violations");
+    PASS();
+}
+
+/* ================================================================== */
 /* Main                                                                */
 /* ================================================================== */
 
@@ -615,6 +926,33 @@ int main(void) {
     test_vector_all_pass();
     test_vector_partial_violation();
     test_vector_nan_violates();
+
+    printf("\n[Serialization]\n");
+    test_json_roundtrip();
+    test_json_bounds_preserved();
+    test_json_empty_array();
+    test_json_null_input();
+    test_json_invalid_syntax();
+    test_file_save_load();
+    test_file_not_found();
+    test_json_preset_roundtrip();
+
+    printf("\n[Aggregation]\n");
+    test_agg_all_pass();
+    test_agg_all_violate();
+    test_agg_violation_rate();
+    test_agg_per_constraint();
+    test_agg_worst_reading();
+    test_agg_severity_breakdown();
+    test_agg_empty();
+
+    printf("\n[Drift Detection]\n");
+    test_drift_init();
+    test_drift_no_drift();
+    test_drift_detected();
+    test_drift_multi_constraint();
+    test_drift_empty();
+    test_drift_with_aggregation();
 
     printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;

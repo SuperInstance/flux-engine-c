@@ -172,6 +172,64 @@ int flux_preset_manufacturing(FluxConstraint *out);
 int flux_preset_telecom(FluxConstraint *out);
 int flux_preset_spacecraft(FluxConstraint *out);
 
+/* ================================================================== */
+/* Serialization                                                       */
+/* ================================================================== */
+
+/** Export constraints to a JSON string (caller must free with free()). */
+char* flux_constraints_to_json(const FluxConstraint* constraints, int n);
+
+/** Parse JSON string into constraints. Returns count parsed, or -1 on error. */
+int flux_constraints_from_json(const char* json, FluxConstraint* out, int max_n);
+
+/** Save constraints to a file. Returns 0 on success, -1 on error. */
+int flux_save_preset(const char* filename, const FluxConstraint* constraints, int n);
+
+/** Load constraints from a file. Returns count loaded, or -1 on error. */
+int flux_load_preset(const char* filename, FluxConstraint* out, int max_n);
+
+/* ================================================================== */
+/* Aggregation                                                         */
+/* ================================================================== */
+
+typedef struct {
+    int total_readings;
+    int total_violations;
+    double violation_rate;
+    int per_constraint_violations[FLUX_MAX_CONSTRAINTS];
+    int worst_reading_index;
+    int severity_breakdown[4]; /**< PASS, CAUTION, WARNING, CRITICAL counts */
+} FluxAggregate;
+
+/** Aggregate batch check results into summary statistics. */
+void flux_aggregate(const uint8_t* masks, int n_readings,
+                    const FluxConstraint* constraints, int n_constraints,
+                    FluxAggregate* out);
+
+/* ================================================================== */
+/* Drift Detection                                                     */
+/* ================================================================== */
+
+typedef struct {
+    int window_size;
+    double sums[FLUX_MAX_CONSTRAINTS];
+    double sum_squares[FLUX_MAX_CONSTRAINTS];
+    int count;
+} FluxDriftDetector;
+
+/** Initialize a drift detector with given window size. */
+void flux_drift_init(FluxDriftDetector* det, int window_size);
+
+/** Add a reading to the drift detector. values[i] corresponds to constraint i. */
+void flux_drift_add(FluxDriftDetector* det, const double* values, int n);
+
+/** Detect drift: returns number of drifting constraints.
+    drifting_constraints[] and drift_rates[] filled with indices and rates.
+    Drift is detected when mean drifts more than 10% of the constraint range
+    from the midpoint of [lo, hi]. */
+int flux_drift_detect(const FluxDriftDetector* det, const FluxConstraint* constraints, int n,
+                      int* drifting_constraints, double* drift_rates);
+
 #ifdef __cplusplus
 }
 #endif
@@ -579,6 +637,248 @@ int flux_preset_spacecraft(FluxConstraint *out) {
     _fc_set(&out[6], "propellant_pct",         5,    100,   FLUX_SEV_CRITICAL);
     _fc_set(&out[7], "comm_signal_dbm",      -130,   -60,   FLUX_SEV_WARNING);
     return 8;
+}
+
+/* ------------------------------------------------------------------ */
+/* Serialization                                                       */
+/* ------------------------------------------------------------------ */
+
+static int _flux_skip_ws(const char* s, int pos) {
+    while (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\n' || s[pos] == '\r') pos++;
+    return pos;
+}
+
+static int _flux_parse_string(const char* s, int pos, char* out, int max_len) {
+    if (s[pos] != '"') return -1;
+    pos++;
+    int i = 0;
+    while (s[pos] && s[pos] != '"' && i < max_len - 1) {
+        if (s[pos] == '\\' && s[pos+1]) { pos++; out[i++] = s[pos++]; continue; }
+        out[i++] = s[pos++];
+    }
+    out[i] = '\0';
+    if (s[pos] == '"') pos++;
+    return pos;
+}
+
+static int _flux_parse_number(const char* s, int pos, double* out) {
+    char buf[64];
+    int i = 0;
+    if (s[pos] == '-') buf[i++] = s[pos++];
+    while ((s[pos] >= '0' && s[pos] <= '9') || s[pos] == '.' ||
+           s[pos] == 'e' || s[pos] == 'E' || s[pos] == '+' || s[pos] == '-') {
+        if (i < 62) buf[i++] = s[pos];
+        pos++;
+    }
+    buf[i] = '\0';
+    *out = strtod(buf, NULL);
+    return pos;
+}
+
+char* flux_constraints_to_json(const FluxConstraint* constraints, int n) {
+    /* Each constraint ~80 chars, plus overhead */
+    size_t cap = (size_t)n * 128 + 64;
+    char* buf = (char*)malloc(cap);
+    int pos = 0;
+    pos += sprintf(buf + pos, "[\n");
+    for (int i = 0; i < n; i++) {
+        pos += sprintf(buf + pos, "  {\"name\":\"%s\",\"lo\":%g,\"hi\":%g,\"severity\":%d}",
+                       constraints[i].name,
+                       (double)constraints[i].lo,
+                       (double)constraints[i].hi,
+                       (int)constraints[i].severity);
+        if (i < n - 1) pos += sprintf(buf + pos, ",");
+        pos += sprintf(buf + pos, "\n");
+    }
+    pos += sprintf(buf + pos, "]");
+    return buf;
+}
+
+int flux_constraints_from_json(const char* json, FluxConstraint* out, int max_n) {
+    if (!json || !out) return -1;
+    int pos = 0;
+    pos = _flux_skip_ws(json, pos);
+    if (json[pos] != '[') return -1;
+    pos++;
+    int count = 0;
+    while (count < max_n) {
+        pos = _flux_skip_ws(json, pos);
+        if (json[pos] == ']') break;
+        if (json[pos] == ',') { pos++; pos = _flux_skip_ws(json, pos); }
+        if (json[pos] != '{') return -1;
+        pos++;
+        memset(&out[count], 0, sizeof(FluxConstraint));
+        /* Parse fields in any order */
+        int got = 0;
+        double lo_val = 0, hi_val = 0, sev_val = 0;
+        char name_val[32] = {0};
+        while (json[pos] && json[pos] != '}') {
+            pos = _flux_skip_ws(json, pos);
+            if (json[pos] == ',' || json[pos] == '"') {
+                if (json[pos] == ',') pos++;
+                pos = _flux_skip_ws(json, pos);
+            }
+            if (json[pos] != '"') { pos++; continue; }
+            char key[32] = {0};
+            pos = _flux_parse_string(json, pos, key, 32);
+            if (pos < 0) return -1;
+            pos = _flux_skip_ws(json, pos);
+            if (json[pos] == ':') pos++;
+            pos = _flux_skip_ws(json, pos);
+            if (strcmp(key, "name") == 0) {
+                pos = _flux_parse_string(json, pos, name_val, 32);
+                if (pos < 0) return -1;
+                got |= 1;
+            } else if (strcmp(key, "lo") == 0) {
+                pos = _flux_parse_number(json, pos, &lo_val);
+                got |= 2;
+            } else if (strcmp(key, "hi") == 0) {
+                pos = _flux_parse_number(json, pos, &hi_val);
+                got |= 4;
+            } else if (strcmp(key, "severity") == 0) {
+                pos = _flux_parse_number(json, pos, &sev_val);
+                got |= 8;
+            } else {
+                /* skip unknown value */
+                if (json[pos] == '"') {
+                    char tmp[64];
+                    pos = _flux_parse_string(json, pos, tmp, 64);
+                } else if (json[pos] == '-' || (json[pos] >= '0' && json[pos] <= '9')) {
+                    double dv;
+                    pos = _flux_parse_number(json, pos, &dv);
+                } else if (json[pos] == 't') {
+                    pos += 4; /* true */
+                } else if (json[pos] == 'f') {
+                    pos += 5; /* false */
+                } else if (json[pos] == 'n') {
+                    pos += 4; /* null */
+                } else {
+                    pos++;
+                }
+            }
+            pos = _flux_skip_ws(json, pos);
+        }
+        if (json[pos] == '}') pos++;
+        if (got == 0xF || got == 0x7) {
+            strncpy(out[count].name, name_val, 31);
+            out[count].name[31] = '\0';
+            out[count].lo = (float)lo_val;
+            out[count].hi = (float)hi_val;
+            out[count].severity = (got & 8) ? (FluxSeverity)(int)sev_val : FLUX_SEV_CAUTION;
+            count++;
+        }
+    }
+    return count;
+}
+
+int flux_save_preset(const char* filename, const FluxConstraint* constraints, int n) {
+    char* json = flux_constraints_to_json(constraints, n);
+    if (!json) return -1;
+    FILE* f = fopen(filename, "w");
+    if (!f) { free(json); return -1; }
+    fputs(json, f);
+    fputs("\n", f);
+    fclose(f);
+    free(json);
+    return 0;
+}
+
+int flux_load_preset(const char* filename, FluxConstraint* out, int max_n) {
+    FILE* f = fopen(filename, "r");
+    if (!f) return -1;
+    /* Read entire file */
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (sz <= 0 || sz > 1024 * 1024) { fclose(f); return -1; }
+    char* buf = (char*)malloc((size_t)sz + 1);
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = '\0';
+    int count = flux_constraints_from_json(buf, out, max_n);
+    free(buf);
+    return count;
+}
+
+/* ------------------------------------------------------------------ */
+/* Aggregation                                                         */
+/* ------------------------------------------------------------------ */
+
+void flux_aggregate(const uint8_t* masks, int n_readings,
+                    const FluxConstraint* constraints, int n_constraints,
+                    FluxAggregate* out) {
+    memset(out, 0, sizeof(FluxAggregate));
+    out->worst_reading_index = -1;
+    int worst_count = 0;
+
+    for (int r = 0; r < n_readings; r++) {
+        out->total_readings++;
+        uint8_t m = masks[r];
+        if (m == 0) {
+            out->severity_breakdown[FLUX_SEV_PASS]++;
+            continue;
+        }
+        out->total_violations++;
+
+        /* Count violations per constraint */
+        int vcount = 0;
+        FluxSeverity max_sev = FLUX_SEV_PASS;
+        for (int i = 0; i < n_constraints && i < FLUX_MAX_CONSTRAINTS; i++) {
+            if (m & (1u << i)) {
+                out->per_constraint_violations[i]++;
+                vcount++;
+                if (constraints[i].severity > max_sev)
+                    max_sev = constraints[i].severity;
+            }
+        }
+        out->severity_breakdown[max_sev]++;
+
+        if (vcount > worst_count) {
+            worst_count = vcount;
+            out->worst_reading_index = r;
+        }
+    }
+
+    out->violation_rate = (n_readings > 0)
+        ? (double)out->total_violations / (double)n_readings
+        : 0.0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Drift Detection                                                     */
+/* ------------------------------------------------------------------ */
+
+void flux_drift_init(FluxDriftDetector* det, int window_size) {
+    memset(det, 0, sizeof(FluxDriftDetector));
+    det->window_size = window_size;
+}
+
+void flux_drift_add(FluxDriftDetector* det, const double* values, int n) {
+    for (int i = 0; i < n && i < FLUX_MAX_CONSTRAINTS; i++) {
+        det->sums[i] += values[i];
+        det->sum_squares[i] += values[i] * values[i];
+    }
+    det->count++;
+}
+
+int flux_drift_detect(const FluxDriftDetector* det, const FluxConstraint* constraints, int n,
+                      int* drifting_constraints, double* drift_rates) {
+    if (det->count == 0) return 0;
+    int nd = 0;
+    for (int i = 0; i < n && i < FLUX_MAX_CONSTRAINTS; i++) {
+        double range = (double)constraints[i].hi - (double)constraints[i].lo;
+        if (range <= 0.0) continue;
+        double mid = ((double)constraints[i].lo + (double)constraints[i].hi) * 0.5;
+        double mean = det->sums[i] / (double)det->count;
+        double deviation = fabs(mean - mid);
+        double threshold = range * 0.1; /* 10% of range */
+        if (deviation > threshold) {
+            drifting_constraints[nd] = i;
+            drift_rates[nd] = deviation / range;
+            nd++;
+        }
+    }
+    return nd;
 }
 
 #endif /* FLUX_ENGINE_IMPLEMENTATION */

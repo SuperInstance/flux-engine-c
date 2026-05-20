@@ -78,6 +78,9 @@ The constraint system architecture maps naturally to the single-header pattern: 
 | **Fracture** | `flux_fracture`, `flux_coalesce` | BFS connected components on bipartite constraint-dim graph |
 | **Sediment** | `flux_sediment_init/add/apply` | Progressive constraint tightening via layered overrides |
 | **Presets** | `flux_preset_*` | 10 domains: automotive, aviation, medical, energy, robotics, marine, HVAC, manufacturing, telecom, spacecraft |
+| **Serialization** | `flux_constraints_to_json`, `flux_constraints_from_json`, `flux_save_preset`, `flux_load_preset` | JSON export/import and file save/load for constraint configs |
+| **Aggregation** | `flux_aggregate` | Batch summary: violation rate, per-constraint counts, severity breakdown, worst reading |
+| **Drift** | `flux_drift_init/add/detect` | Running-mean drift detection against constraint midpoints |
 
 ## Types
 
@@ -101,7 +104,7 @@ typedef struct {
 ## Build & Test
 
 ```bash
-make run-test    # 43 tests
+make run-test    # 64 tests
 make run-bench   # throughput benchmark
 ```
 
