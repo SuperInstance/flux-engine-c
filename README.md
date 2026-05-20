@@ -6,16 +6,27 @@ Single-header C99 library combining constraint checking, graph fracture, sedimen
 
 This is the complete flux constraint system in one file: check values against bounds, fracture independent constraints into parallel blocks, and layer corrections via sediment. Three stages, one header.
 
-### The 3-Line Integration Story
+### The 5-Line Integration Story
 
 ```c
-#define FLUX_ENGINE_IMPLEMENTATION
-#include "flux_engine.h"
+#define FLUX_ENGINE_IMPLEMENTATION   // 1. emit implementation in one .c file
+#include "flux_engine.h"            // 2. include the header
 
-// That's it. No dependencies beyond libc + libm.
+FluxConstraint c[8];                // 3. declare constraints
+int n = flux_preset_automotive(c);  // 4. load a domain preset
+uint8_t mask = flux_check(value, c, n);  // 5. check
 ```
 
-This is the [stb-style single-header pattern](https://github.com/nothings/stb). The header acts as both the public API (types and function declarations) and the implementation. Include it without `FLUX_ENGINE_IMPLEMENTATION` to get declarations only — put that in multiple files. Define it in exactly one `.c` file to emit the implementation. No build system changes, no CMake, no linker flags. Drop the file in your project and compile.
+That's the honest minimum. The [stb-style single-header pattern](https://github.com/nothings/stb) means no build system changes, no CMake, no linker flags. The header acts as both the public API (types and function declarations) and the implementation. Include it without `FLUX_ENGINE_IMPLEMENTATION` to get declarations only. Define it in exactly one `.c` file to emit the implementation. Drop the file in your project and compile.
+
+For per-field CAN bus validation (value[i] against constraint[i]), use `flux_check_vector`:
+
+```c
+double values[8] = {95.0, 3.5, 3500.0, 14.1, 40.0, 100.0, 12.0, 500.0};
+FluxConstraint c[8];
+int n = flux_preset_automotive(c);
+uint8_t mask = flux_check_vector(values, n, c);
+```
 
 ### The Three Stages
 
@@ -63,7 +74,7 @@ The constraint system architecture maps naturally to the single-header pattern: 
 
 | Module | Functions | What |
 |--------|-----------|------|
-| **Check** | `flux_check`, `flux_check_batch` | NaN-safe bounds checking, zero false negatives |
+| **Check** | `flux_check`, `flux_check_batch`, `flux_check_vector` | NaN-safe bounds checking, per-value and per-vector, zero false negatives |
 | **Fracture** | `flux_fracture`, `flux_coalesce` | BFS connected components on bipartite constraint-dim graph |
 | **Sediment** | `flux_sediment_init/add/apply` | Progressive constraint tightening via layered overrides |
 | **Presets** | `flux_preset_*` | 10 domains: automotive, aviation, medical, energy, robotics, marine, HVAC, manufacturing, telecom, spacecraft |
@@ -90,7 +101,7 @@ typedef struct {
 ## Build & Test
 
 ```bash
-make run-test    # 36 tests
+make run-test    # 43 tests
 make run-bench   # throughput benchmark
 ```
 

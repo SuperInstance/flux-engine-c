@@ -115,6 +115,11 @@ void flux_check_batch(const float *values, int n_values,
                       const FluxConstraint *constraints, int n_constraints,
                       uint8_t *out_masks);
 
+/** Check N values against N respective constraints (value[i] against constraint[i]).
+    Returns a bitmask where bit i is set if values[i] violates constraints[i].
+    n must be <= FLUX_MAX_CONSTRAINTS. */
+uint8_t flux_check_vector(const double *values, int n, const FluxConstraint *constraints);
+
 /** Decode a mask into a FluxResult. */
 FluxResult flux_result_decode(uint8_t error_mask, const FluxConstraint *constraints, int n);
 
@@ -218,6 +223,22 @@ void flux_check_batch(const float *values, int n_values,
     for (int i = 0; i < n_values; i++) {
         out_masks[i] = flux_check(values[i], constraints, n_constraints);
     }
+}
+
+uint8_t flux_check_vector(const double *values, int n, const FluxConstraint *constraints) {
+    uint8_t mask = 0;
+    for (int i = 0; i < n && i < FLUX_MAX_CONSTRAINTS; i++) {
+        float v = (float)values[i];
+        /* NaN check */
+        if (v != v) {
+            mask |= (uint8_t)(1u << i);
+            continue;
+        }
+        if (!(v >= constraints[i].lo && v <= constraints[i].hi)) {
+            mask |= (uint8_t)(1u << i);
+        }
+    }
+    return mask;
 }
 
 FluxResult flux_result_decode(uint8_t error_mask, const FluxConstraint *constraints, int n) {

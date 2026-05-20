@@ -1,5 +1,5 @@
 /**
- * test_flux_engine.c — 36 tests for the unified constraint engine
+ * test_flux_engine.c — 43 tests for the unified constraint engine
  *
  * Compile: gcc -O2 -lm -o test_flux_engine test_flux_engine.c
  */
@@ -510,6 +510,51 @@ static void test_zero_constraints(void) {
 }
 
 /* ================================================================== */
+/* Section 6: flux_check_vector (3 tests)                              */
+/* ================================================================== */
+
+static void test_vector_all_pass(void) {
+    TEST_START("check_vector: all values in bounds → mask 0");
+    FluxConstraint c[4] = {
+        {"a", 0, 100, FLUX_SEV_CAUTION},
+        {"b", -10, 10, FLUX_SEV_CAUTION},
+        {"c", 0, 1000, FLUX_SEV_CAUTION},
+        {"d", 50, 150, FLUX_SEV_CAUTION},
+    };
+    double vals[4] = {50.0, 0.0, 500.0, 100.0};
+    uint8_t m = flux_check_vector(vals, 4, c);
+    ASSERT_EQ(m, 0, "all in bounds");
+    PASS();
+}
+
+static void test_vector_partial_violation(void) {
+    TEST_START("check_vector: partial violations");
+    FluxConstraint c[4] = {
+        {"a", 0, 10, FLUX_SEV_CAUTION},
+        {"b", 0, 10, FLUX_SEV_CAUTION},
+        {"c", 0, 10, FLUX_SEV_CAUTION},
+        {"d", 0, 10, FLUX_SEV_CAUTION},
+    };
+    double vals[4] = {5.0, 15.0, 3.0, 20.0};  /* b and d violate */
+    uint8_t m = flux_check_vector(vals, 4, c);
+    ASSERT_EQ(m, 0x0A, "bits 1 and 3 set");
+    PASS();
+}
+
+static void test_vector_nan_violates(void) {
+    TEST_START("check_vector: NaN violates its constraint");
+    FluxConstraint c[3] = {
+        {"a", 0, 10, FLUX_SEV_CAUTION},
+        {"b", 0, 10, FLUX_SEV_CAUTION},
+        {"c", 0, 10, FLUX_SEV_CAUTION},
+    };
+    double vals[3] = {5.0, NAN, 3.0};  /* only b is NaN */
+    uint8_t m = flux_check_vector(vals, 3, c);
+    ASSERT_EQ(m, 0x02, "only bit 1 (NaN) violates");
+    PASS();
+}
+
+/* ================================================================== */
 /* Main                                                                */
 /* ================================================================== */
 
@@ -565,6 +610,11 @@ int main(void) {
     test_sediment_with_preset();
     test_nan_batch_all_violate();
     test_zero_constraints();
+
+    printf("\n[Check Vector]\n");
+    test_vector_all_pass();
+    test_vector_partial_violation();
+    test_vector_nan_violates();
 
     printf("\n=== Results: %d passed, %d failed ===\n", tests_passed, tests_failed);
     return tests_failed > 0 ? 1 : 0;
