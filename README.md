@@ -6,7 +6,7 @@ Single-header C99 library combining constraint checking, graph fracture, sedimen
 
 This is the complete flux constraint system in one file: check values against bounds, fracture independent constraints into parallel blocks, and layer corrections via sediment. Three stages, one header.
 
-### The 5-Line Integration Story
+### Minimal Integration
 
 ```c
 #define FLUX_ENGINE_IMPLEMENTATION   // 1. emit implementation in one .c file
