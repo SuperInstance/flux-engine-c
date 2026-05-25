@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cc: [gcc, clang]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile
+        run: |
+          ${{ matrix.cc }} -O2 -Wall -Wextra -pedantic -lm -o test_flux_engine test_flux_engine.c
+          ${{ matrix.cc }} -O2 -Wall -Wextra -pedantic -lm -o bench_flux_engine bench_flux_engine.c
+        env:
+          CC: ${{ matrix.cc }}
+
+      - name: Run tests
+        run: ./test_flux_engine
+
+      - name: Run benchmark
+        run: ./bench_flux_engine
